@@ -7,7 +7,9 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -27,6 +29,7 @@ from grabbr.downloader import (
     is_supported_url,
     looks_like_url,
 )
+from grabbr.paths import data_dir
 from grabbr.settings import Settings
 
 FORMAT_LABELS = {"MP3": "mp3", "Original": "original"}
@@ -190,10 +193,34 @@ class GrabbrApp(ctk.CTk):
     def _drain_ui_queue(self) -> None:
         try:
             while True:
-                self._ui_queue.get_nowait()()
-        except queue.Empty:
+                try:
+                    fn = self._ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    fn()
+                except Exception:
+                    # One bad update must never freeze the window.
+                    self._report_error()
+        finally:
+            self.after(80, self._drain_ui_queue)
+
+    def report_callback_exception(self, exc, val, tb) -> None:  # Tk hook
+        self._report_error((exc, val, tb))
+
+    def _report_error(self, exc_info=None) -> None:
+        text = "".join(traceback.format_exception(*(exc_info or sys.exc_info())))
+        try:
+            with open(data_dir() / "errors.log", "a", encoding="utf-8") as fh:
+                fh.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} grabbr {__version__}\n")
+                fh.write(text)
+        except OSError:
             pass
-        self.after(80, self._drain_ui_queue)
+        try:
+            last = text.strip().splitlines()[-1]
+            self.log(f"Internal error: {last} (details in errors.log)", "error")
+        except Exception:
+            pass
 
     def _spawn(self, fn: Callable[[], None]) -> None:
         threading.Thread(target=fn, daemon=True).start()
@@ -313,7 +340,9 @@ class GrabbrApp(ctk.CTk):
                 self.progress.set(1)
                 n = len(event.files)
                 self.status.configure(text=f"Done. {n} file{'s' if n != 1 else ''} saved.")
+                self.log(f"✓ Done ({n} file{'s' if n != 1 else ''})", "ok")
                 self.url_entry.delete(0, "end")
+                self.bell()
             elif event.cancelled:
                 self.progress.set(0)
                 self.status.configure(text="Cancelled.")

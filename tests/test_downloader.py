@@ -94,6 +94,21 @@ def test_successful_run(tmp_path):
     assert (tmp_path / "out").is_dir()
 
 
+def test_finishes_even_if_a_child_holds_the_pipe_open(tmp_path):
+    start = time.monotonic()
+    events = run("https://youtu.be/orphan", tmp_path)
+    assert time.monotonic() - start < d.READER_GRACE_SECONDS + 5
+    final = events[-1]
+    assert isinstance(final, d.Finished) and final.ok
+    assert final.files == [f"{tmp_path / 'out'}/Orphan.mp3"]
+
+
+def test_transcript_written(tmp_path):
+    run("https://youtu.be/fail", tmp_path)
+    log = (tmp_path / "home" / "last-run.log").read_text(encoding="utf-8")
+    assert "Video unavailable" in log and "exit code 1" in log
+
+
 def test_failed_run_reports_last_error(tmp_path):
     final = run("https://youtu.be/fail", tmp_path)[-1]
     assert isinstance(final, d.Finished) and not final.ok

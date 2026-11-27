@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -262,42 +263,95 @@ class Download:
     def _run(self) -> None:
         files: list[str] = []
         errors: list[str] = []
+        transcript = _Transcript()
         try:
-            cmd = self._resolve_cmd()
-            env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-            self._proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                env=env,
-                **tools.no_window_kwargs(),
-            )
-            assert self._proc.stdout is not None
-            for raw in self._proc.stdout:
-                event = parse_line(raw)
-                if event is None:
-                    continue
-                if isinstance(event, FileDone):
-                    files.append(event.path)
-                elif isinstance(event, Log) and event.level == "error":
-                    errors.append(event.text)
-                self.on_event(event)
-            code = self._proc.wait()
-        except Exception as exc:  # tool missing, can't spawn, etc.
-            self.on_event(Finished(ok=False, error=str(exc)))
-            return
+            try:
+                cmd = self._resolve_cmd()
+                transcript.write("$ " + subprocess.list2cmdline(cmd))
+                env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+                self._proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    env=env,
+                    **tools.no_window_kwargs(),
+                )
+            except Exception as exc:  # tool missing, can't spawn, etc.
+                transcript.write(f"!! failed to start: {exc!r}")
+                self.on_event(Finished(ok=False, error=str(exc)))
+                return
 
-        if self._cancelled.is_set():
-            self.on_event(Finished(ok=False, cancelled=True, files=files))
-        elif code == 0 and files:
-            self.on_event(Finished(ok=True, files=files))
-        else:
-            msg = errors[-1] if errors else f"yt-dlp exited with code {code}"
-            if code == 0 and not files:
-                msg = "Nothing was downloaded."
-            self.on_event(Finished(ok=False, files=files, error=msg))
+            def pump() -> None:
+                assert self._proc is not None and self._proc.stdout is not None
+                try:
+                    for raw in self._proc.stdout:
+                        transcript.write(raw.rstrip("\r\n"))
+                        event = parse_line(raw)
+                        if event is None:
+                            continue
+                        if isinstance(event, FileDone):
+                            files.append(event.path)
+                        elif isinstance(event, Log) and event.level == "error":
+                            errors.append(event.text)
+                        self.on_event(event)
+                except Exception as exc:  # never let a bad line hang the job
+                    transcript.write(f"!! reader error: {exc!r}")
+
+            reader = threading.Thread(target=pump, daemon=True)
+            reader.start()
+            code = self._proc.wait()
+            # A helper process (ffmpeg, deno) that inherited yt-dlp's stdout can keep
+            # the pipe open after yt-dlp exits, so don't wait on EOF forever.
+            reader.join(timeout=READER_GRACE_SECONDS)
+            transcript.write(
+                f"-- exit code {code}"
+                + ("" if not reader.is_alive() else " (output pipe still open; continuing)")
+            )
+
+            if self._cancelled.is_set():
+                self.on_event(Finished(ok=False, cancelled=True, files=list(files)))
+            elif code == 0 and files:
+                self.on_event(Finished(ok=True, files=list(files)))
+            else:
+                msg = errors[-1] if errors else f"yt-dlp exited with code {code}"
+                if code == 0 and not files:
+                    msg = "Nothing was downloaded."
+                self.on_event(Finished(ok=False, files=list(files), error=msg))
+        finally:
+            transcript.close()
+
+
+READER_GRACE_SECONDS = 3.0
+
+
+class _Transcript:
+    """Raw yt-dlp output for the latest run, in %LOCALAPPDATA%\\grabbr\\last-run.log."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        try:
+            from grabbr.paths import data_dir
+
+            self._fh = open(data_dir() / "last-run.log", "w", encoding="utf-8")  # noqa: SIM115
+        except OSError:
+            self._fh = None
+
+    def write(self, line: str) -> None:
+        with self._lock:
+            if self._fh:
+                try:
+                    self._fh.write(f"{time.strftime('%H:%M:%S')} {line}\n")
+                    self._fh.flush()
+                except (OSError, ValueError):
+                    pass
+
+    def close(self) -> None:
+        with self._lock:
+            if self._fh:
+                self._fh.close()
+                self._fh = None

@@ -31,6 +31,16 @@ if url.endswith("/ok"):
     say(f"{DONE} {out_dir}/Artist - Test Song.mp3")
     sys.exit(0)
 
+if url.endswith("/orphan"):
+    # Like ffmpeg/deno inheriting yt-dlp's stdout: a child keeps the pipe open
+    # long after this process exits.
+    import subprocess
+
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], close_fds=False)
+    say(f"{PP} FFmpegExtractAudio|started|Orphan")
+    say(f"{DONE} {out_dir}/Orphan.mp3")
+    sys.exit(0)
+
 if url.endswith("/fail"):
     say("WARNING: something odd")
     say("ERROR: [youtube] abc: Video unavailable")
