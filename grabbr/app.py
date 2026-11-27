@@ -32,6 +32,8 @@ from grabbr.downloader import (
 from grabbr.paths import data_dir
 from grabbr.settings import Settings
 
+LOCKED_BUTTON_COLOR = ("gray78", "gray30")
+LOCKED_TEXT_COLOR = ("gray45", "gray60")
 DOWNLOAD_SHARE = 0.85  # portion of the bar for the download; the rest is conversion
 
 FORMAT_LABELS = {"MP3": "mp3", "Original": "original"}
@@ -115,19 +117,21 @@ class GrabbrApp(ctk.CTk):
         self.format_btn.set(FORMAT_NAMES.get(self.settings.audio_format, "MP3"))
         self.format_btn.pack(side="left")
         self.playlist_var = tk.BooleanVar(value=self.settings.playlist)
-        ctk.CTkCheckBox(
+        self.playlist_box = ctk.CTkCheckBox(
             opts,
             text="Whole playlist",
             variable=self.playlist_var,
             command=self._on_playlist,
-        ).pack(side="left", padx=(14, 0))
+        )
+        self.playlist_box.pack(side="left", padx=(14, 0))
         self.clip_var = tk.BooleanVar(value=self.settings.watch_clipboard)
-        ctk.CTkCheckBox(
+        self.clip_box = ctk.CTkCheckBox(
             opts,
             text="Auto-paste links",
             variable=self.clip_var,
             command=self._on_clipboard_toggle,
-        ).pack(side="left", padx=(14, 0))
+        )
+        self.clip_box.pack(side="left", padx=(14, 0))
 
         # Output folder row
         out = ctk.CTkFrame(self, fg_color="transparent")
@@ -136,15 +140,15 @@ class GrabbrApp(ctk.CTk):
         ctk.CTkLabel(out, text="Save to:").grid(row=0, column=0, padx=(0, 8))
         self.out_label = ctk.CTkLabel(out, text=self.settings.output_dir, anchor="w")
         self.out_label.grid(row=0, column=1, sticky="ew")
-        ctk.CTkButton(out, text="Change…", width=80, command=self._choose_folder).grid(
-            row=0, column=2, padx=(8, 0)
-        )
+        self.change_btn = ctk.CTkButton(out, text="Change…", width=80, command=self._choose_folder)
+        self.change_btn.grid(row=0, column=2, padx=(8, 0))
         ctk.CTkButton(
             out,
             text="Open",
             width=64,
             fg_color="transparent",
             border_width=1,
+            text_color=("gray10", "gray90"),
             command=self._open_output,
         ).grid(row=0, column=3, padx=(6, 0))
 
@@ -257,26 +261,52 @@ class GrabbrApp(ctk.CTk):
     def _set_busy(self, what: str | None) -> None:
         self._busy = what
         idle = "normal" if what is None else "disabled"
-        self.grab_btn.configure(state=idle)
-        self.setup_btn.configure(state=idle)
-        self.update_btn.configure(state=idle)
+        # Lock every setting while a download or tool install is running.
+        # ("Open" folder stays usable: it doesn't change anything.)
+        for widget in (
+            self.url_entry,
+            self.format_btn,
+            self.playlist_box,
+            self.clip_box,
+        ):
+            widget.configure(state=idle)
+        # CTkButton only dims its text when disabled; grey the whole button so
+        # it's obvious it can't be clicked.
+        normal_fg = ctk.ThemeManager.theme["CTkButton"]["fg_color"]
+        for button in (self.grab_btn, self.change_btn, self.setup_btn, self.update_btn):
+            button.configure(
+                state=idle,
+                fg_color=normal_fg if what is None else LOCKED_BUTTON_COLOR,
+                text_color_disabled=LOCKED_TEXT_COLOR,
+            )
         self.cancel_btn.configure(state="normal" if what == "download" else "disabled")
 
     # --- settings handlers --------------------------------------------------
 
     def _on_format(self, label: str) -> None:
+        if self._busy:  # shouldn't happen (widget is disabled), but be safe
+            self.format_btn.set(FORMAT_NAMES[self.settings.audio_format])
+            return
         self.settings.audio_format = FORMAT_LABELS[label]
         self.settings.save()
 
     def _on_playlist(self) -> None:
+        if self._busy:
+            self.playlist_var.set(self.settings.playlist)
+            return
         self.settings.playlist = bool(self.playlist_var.get())
         self.settings.save()
 
     def _on_clipboard_toggle(self) -> None:
+        if self._busy:
+            self.clip_var.set(self.settings.watch_clipboard)
+            return
         self.settings.watch_clipboard = bool(self.clip_var.get())
         self.settings.save()
 
     def _choose_folder(self) -> None:
+        if self._busy:
+            return
         chosen = filedialog.askdirectory(initialdir=self.settings.output_dir, mustexist=False)
         if chosen:
             self.settings.output_dir = str(Path(chosen))
@@ -290,7 +320,7 @@ class GrabbrApp(ctk.CTk):
 
     def _poll_clipboard(self) -> None:
         try:
-            if self.settings.watch_clipboard and self._busy != "download":
+            if self.settings.watch_clipboard and self._busy is None:
                 text = self.clipboard_get().strip()
                 if text != self._last_clipboard:
                     self._last_clipboard = text
