@@ -32,6 +32,8 @@ from grabbr.downloader import (
 from grabbr.paths import data_dir
 from grabbr.settings import Settings
 
+DOWNLOAD_SHARE = 0.85  # portion of the bar for the download; the rest is conversion
+
 FORMAT_LABELS = {"MP3": "mp3", "Original": "original"}
 FORMAT_NAMES = {v: k for k, v in FORMAT_LABELS.items()}
 
@@ -70,6 +72,7 @@ class GrabbrApp(ctk.CTk):
         self._download: Download | None = None
         self._busy: str | None = None  # None | "download" | "tools"
         self._last_clipboard = ""
+        self._bar_busy = False
 
         self.title(f"grabbr {__version__}")
         self.geometry("680x520")
@@ -225,6 +228,20 @@ class GrabbrApp(ctk.CTk):
     def _spawn(self, fn: Callable[[], None]) -> None:
         threading.Thread(target=fn, daemon=True).start()
 
+    def _bar(self, fraction: float = 0.0, busy: bool = False) -> None:
+        """Set the progress bar, or animate it when there's no measurable progress."""
+        if busy:
+            if not self._bar_busy:
+                self.progress.configure(mode="indeterminate")
+                self.progress.start()
+                self._bar_busy = True
+            return
+        if self._bar_busy:
+            self.progress.stop()
+            self.progress.configure(mode="determinate")
+            self._bar_busy = False
+        self.progress.set(max(0.0, min(1.0, fraction)))
+
     def log(self, text: str, tag: str | None = None) -> None:
         self.log_box.configure(state="normal")
         if tag:
@@ -307,7 +324,7 @@ class GrabbrApp(ctk.CTk):
             playlist=self.settings.playlist,
         )
         self.log(f"\n▶ {url}")
-        self.progress.set(0)
+        self._bar(0)
         self.status.configure(text="Starting…")
         self._set_busy("download")
         self._download = Download(url, opts, lambda e: self._ui(lambda: self._on_event(e)))
@@ -319,7 +336,12 @@ class GrabbrApp(ctk.CTk):
             if event.index and event.count and event.count > 1:
                 prefix = f"[{event.index}/{event.count}] "
             if event.fraction is not None:
-                self.progress.set(event.fraction)
+                # Downloading only fills part of the bar; conversion and tagging
+                # still have to happen, so never show "full" until Finished.
+                item = event.fraction * DOWNLOAD_SHARE
+                if event.index and event.count and event.count > 1:
+                    item = (event.index - 1 + item) / event.count
+                self._bar(item)
                 pct = f"{event.fraction * 100:.0f}%"
             else:
                 pct = human_bytes(event.downloaded)
@@ -327,6 +349,7 @@ class GrabbrApp(ctk.CTk):
             bits = [b for b in (pct, speed, human_eta(event.eta)) if b]
             self.status.configure(text=f"{prefix}{event.title}  ·  " + "  ·  ".join(bits))
         elif isinstance(event, Stage):
+            self._bar(busy=True)  # yt-dlp gives no % for ffmpeg work, so animate
             self.status.configure(text=f"{event.text}…  {event.title}")
         elif isinstance(event, FileDone):
             self.log(f"✓ Saved {event.path}", "ok")
@@ -337,17 +360,18 @@ class GrabbrApp(ctk.CTk):
             self._download = None
             self._set_busy(None)
             if event.ok:
-                self.progress.set(1)
+                self._bar(1)
                 n = len(event.files)
                 self.status.configure(text=f"Done. {n} file{'s' if n != 1 else ''} saved.")
                 self.log(f"✓ Done ({n} file{'s' if n != 1 else ''})", "ok")
                 self.url_entry.delete(0, "end")
                 self.bell()
             elif event.cancelled:
-                self.progress.set(0)
+                self._bar(0)
                 self.status.configure(text="Cancelled.")
                 self.log("Cancelled.", "warning")
             else:
+                self._bar(0)
                 self.status.configure(text="Download failed. See log.")
                 self.log(event.error or "Download failed.", "error")
                 if event.error and ("Sign in" in event.error or "403" in event.error):
@@ -399,7 +423,7 @@ class GrabbrApp(ctk.CTk):
 
             def progress(frac: float | None, n: str = name) -> None:
                 if frac is not None:
-                    self._ui(lambda f=frac: self.progress.set(f))
+                    self._ui(lambda f=frac: self._bar(f))
 
             try:
                 tools.install(name, self.log_bg, progress)
@@ -409,7 +433,7 @@ class GrabbrApp(ctk.CTk):
 
         def done() -> None:
             self._set_busy(None)
-            self.progress.set(0)
+            self._bar(0)
             if still:
                 self.status.configure(text="Some tools are still missing. See log.")
             else:

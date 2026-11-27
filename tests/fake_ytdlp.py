@@ -41,6 +41,14 @@ if url.endswith("/orphan"):
     say(f"{DONE} {out_dir}/Orphan.mp3")
     sys.exit(0)
 
+if url.endswith("/slowconvert"):
+    for done in (0, 500, 1000):
+        say(f"{DL} {done}|1000|NA|2048.0|3|NA|NA|Long Mix")
+    say(f"{PP} FFmpegExtractAudio|started|Long Mix")
+    time.sleep(4)
+    say(f"{DONE} {out_dir}/Long Mix.mp3")
+    sys.exit(0)
+
 if url.endswith("/fail"):
     say("WARNING: something odd")
     say("ERROR: [youtube] abc: Video unavailable")
